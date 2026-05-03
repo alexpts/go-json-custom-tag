@@ -62,10 +62,6 @@ func UnmarshalWithTag(data []byte, v any, structTag string) error {
 }
 
 func New(structTag string) *JSON {
-	if structTag == "" {
-		structTag = "json"
-	}
-
 	return &JSON{Tag: structTag}
 }
 
@@ -591,65 +587,43 @@ func appendJSONMarshal(buf []byte, value any) ([]byte, error) {
 }
 
 func appendStringArray(buf []byte, value reflect.Value) []byte {
-	buf = append(buf, '[')
-	for i := range value.Len() {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-
-		buf = strconv.AppendQuote(buf, value.Index(i).String())
-	}
-
-	return append(buf, ']')
+	return appendArray(buf, value, func(buf []byte, item reflect.Value) []byte {
+		return strconv.AppendQuote(buf, item.String())
+	})
 }
 
 func appendBoolArray(buf []byte, value reflect.Value) []byte {
-	buf = append(buf, '[')
-	for i := range value.Len() {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-
-		buf = strconv.AppendBool(buf, value.Index(i).Bool())
-	}
-
-	return append(buf, ']')
+	return appendArray(buf, value, func(buf []byte, item reflect.Value) []byte {
+		return strconv.AppendBool(buf, item.Bool())
+	})
 }
 
 func appendIntArray(buf []byte, value reflect.Value) []byte {
-	buf = append(buf, '[')
-	for i := range value.Len() {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-
-		buf = strconv.AppendInt(buf, value.Index(i).Int(), 10)
-	}
-
-	return append(buf, ']')
+	return appendArray(buf, value, func(buf []byte, item reflect.Value) []byte {
+		return strconv.AppendInt(buf, item.Int(), 10)
+	})
 }
 
 func appendUintArray(buf []byte, value reflect.Value) []byte {
-	buf = append(buf, '[')
-	for i := range value.Len() {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-
-		buf = strconv.AppendUint(buf, value.Index(i).Uint(), 10)
-	}
-
-	return append(buf, ']')
+	return appendArray(buf, value, func(buf []byte, item reflect.Value) []byte {
+		return strconv.AppendUint(buf, item.Uint(), 10)
+	})
 }
 
 func appendFloatArray(buf []byte, value reflect.Value, bitSize int) []byte {
+	return appendArray(buf, value, func(buf []byte, item reflect.Value) []byte {
+		return strconv.AppendFloat(buf, item.Float(), 'g', -1, bitSize)
+	})
+}
+
+func appendArray(buf []byte, value reflect.Value, appendItem func([]byte, reflect.Value) []byte) []byte {
 	buf = append(buf, '[')
 	for i := range value.Len() {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
 
-		buf = strconv.AppendFloat(buf, value.Index(i).Float(), 'g', -1, bitSize)
+		buf = appendItem(buf, value.Index(i))
 	}
 
 	return append(buf, ']')
@@ -668,46 +642,42 @@ func isZero(v reflect.Value) bool {
 }
 
 func toInt64(value any) (int64, error) {
-	switch v := value.(type) {
-	case json.Number:
-		return v.Int64()
-	case float64:
-		return int64(v), nil
-	default:
-		return 0, fmt.Errorf("expected number, got %T", value)
+	number, err := toNumber(value)
+	if err != nil {
+		return 0, err
 	}
+
+	return number.Int64()
 }
 
 func toUint64(value any) (uint64, error) {
-	switch v := value.(type) {
-	case json.Number:
-		asInt, err := v.Int64()
-		if err != nil {
-			return 0, err
-		}
-		if asInt < 0 {
-			return 0, fmt.Errorf("negative number for unsigned value: %d", asInt)
-		}
-
-		return uint64(asInt), nil
-	case float64:
-		if v < 0 {
-			return 0, fmt.Errorf("negative number for unsigned value: %f", v)
-		}
-
-		return uint64(v), nil
-	default:
-		return 0, fmt.Errorf("expected number, got %T", value)
+	asInt, err := toInt64(value)
+	if err != nil {
+		return 0, err
 	}
+	if asInt < 0 {
+		return 0, fmt.Errorf("negative number for unsigned value: %d", asInt)
+	}
+
+	return uint64(asInt), nil
 }
 
 func toFloat64(value any) (float64, error) {
+	number, err := toNumber(value)
+	if err != nil {
+		return 0, err
+	}
+
+	return number.Float64()
+}
+
+func toNumber(value any) (json.Number, error) {
 	switch v := value.(type) {
 	case json.Number:
-		return v.Float64()
-	case float64:
 		return v, nil
+	case float64:
+		return json.Number(strconv.FormatFloat(v, 'g', -1, 64)), nil
 	default:
-		return 0, fmt.Errorf("expected number, got %T", value)
+		return "", fmt.Errorf("expected number, got %T", value)
 	}
 }
