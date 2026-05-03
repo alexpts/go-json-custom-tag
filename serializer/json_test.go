@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"go-json-presenter/internal/model"
+	"github.com/alexpts/go-json-custom-tag/test/model"
 )
 
 type account struct {

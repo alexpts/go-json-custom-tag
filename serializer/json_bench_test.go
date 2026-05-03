@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"go-json-presenter/internal/model"
+	"github.com/alexpts/go-json-custom-tag/test/model"
 )
 
 type benchProfile struct {
