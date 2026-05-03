@@ -515,20 +515,7 @@ func encoderForType(typ reflect.Type) valueEncoder {
 	case reflect.Float64:
 		return encodeFloat64Value
 	case reflect.Slice, reflect.Array:
-		switch typ.Elem().Kind() {
-		case reflect.String:
-			return encodeStringArrayValue
-		case reflect.Bool:
-			return encodeBoolArrayValue
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return encodeIntArrayValue
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			return encodeUintArrayValue
-		case reflect.Float32:
-			return encodeFloat32ArrayValue
-		case reflect.Float64:
-			return encodeFloat64ArrayValue
-		}
+		return encodeArrayValue
 	}
 
 	return encodeDefaultValue
@@ -562,52 +549,28 @@ func encodeFloat64Value(buf []byte, value reflect.Value, _ JSON) ([]byte, error)
 	return strconv.AppendFloat(buf, dereferenceValue(value).Float(), 'g', -1, 64), nil
 }
 
-func encodeStringArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+func encodeArrayValue(buf []byte, value reflect.Value, codec JSON) ([]byte, error) {
 	if value.Kind() == reflect.Slice && value.IsNil() {
 		return append(buf, "null"...), nil
 	}
 
-	return appendStringArray(buf, dereferenceValue(value)), nil
-}
-
-func encodeBoolArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return append(buf, "null"...), nil
+	value = dereferenceValue(value)
+	switch value.Type().Elem().Kind() {
+	case reflect.String:
+		return appendStringArray(buf, value), nil
+	case reflect.Bool:
+		return appendBoolArray(buf, value), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return appendIntArray(buf, value), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return appendUintArray(buf, value), nil
+	case reflect.Float32:
+		return appendFloatArray(buf, value, 32), nil
+	case reflect.Float64:
+		return appendFloatArray(buf, value, 64), nil
+	default:
+		return codec.appendValue(buf, value)
 	}
-
-	return appendBoolArray(buf, dereferenceValue(value)), nil
-}
-
-func encodeIntArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return append(buf, "null"...), nil
-	}
-
-	return appendIntArray(buf, dereferenceValue(value)), nil
-}
-
-func encodeUintArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return append(buf, "null"...), nil
-	}
-
-	return appendUintArray(buf, dereferenceValue(value)), nil
-}
-
-func encodeFloat32ArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return append(buf, "null"...), nil
-	}
-
-	return appendFloatArray(buf, dereferenceValue(value), 32), nil
-}
-
-func encodeFloat64ArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return append(buf, "null"...), nil
-	}
-
-	return appendFloatArray(buf, dereferenceValue(value), 64), nil
 }
 
 func dereferenceValue(value reflect.Value) reflect.Value {
