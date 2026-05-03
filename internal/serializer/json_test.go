@@ -18,61 +18,155 @@ type profile struct {
 	Account account    `json:"account" json_snake:"account" json_camel:"account"`
 }
 
-func TestMarshalWithSnakeTag(t *testing.T) {
-	enc := NewJsonEncoder("json_snake")
-	user := model.User{LastName: "Ivanov"}
+type taggedSample struct {
+	Name     string   `json:"name" json_snake:"name" json_camel:"name"`
+	LastName string   `json:"lastName" json_snake:"last_name" json_camel:"lastName"`
+	Age      int      `json:"age,omitempty" json_snake:"age,omitempty" json_camel:"age,omitempty"`
+	Secret   string   `json:"-" json_snake:"-" json_camel:"-"`
+	Tags     []string `json:"tags" json_snake:"tags" json_camel:"tags"`
+}
 
-	got, err := enc.Marshal(user)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+func TestMarshalWithTags(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		in   any
+		want string
+	}{
+		{
+			name: "user snake",
+			tag:  "json_snake",
+			in:   model.User{LastName: "Ivanov"},
+			want: `{"last_name":"Ivanov"}`,
+		},
+		{
+			name: "user camel",
+			tag:  "json_camel",
+			in:   model.User{LastName: "Ivanov"},
+			want: `{"lastName":"Ivanov"}`,
+		},
+		{
+			name: "sample snake omitempty and skip",
+			tag:  "json_snake",
+			in: taggedSample{
+				Name:     "Ivan",
+				LastName: "Ivanov",
+				Secret:   "hidden",
+				Tags:     []string{"go", "json"},
+			},
+			want: `{"name":"Ivan","last_name":"Ivanov","tags":["go","json"]}`,
+		},
+		{
+			name: "sample camel includes age",
+			tag:  "json_camel",
+			in: taggedSample{
+				Name:     "Ivan",
+				LastName: "Ivanov",
+				Age:      31,
+				Secret:   "hidden",
+				Tags:     []string{"go"},
+			},
+			want: `{"name":"Ivan","lastName":"Ivanov","age":31,"tags":["go"]}`,
+		},
+		{
+			name: "nil slice",
+			tag:  "json_snake",
+			in: taggedSample{
+				Name:     "Ivan",
+				LastName: "Ivanov",
+				Tags:     nil,
+			},
+			want: `{"name":"Ivan","last_name":"Ivanov","tags":null}`,
+		},
+		{
+			name: "empty slice",
+			tag:  "json_snake",
+			in: taggedSample{
+				Name:     "Ivan",
+				LastName: "Ivanov",
+				Tags:     []string{},
+			},
+			want: `{"name":"Ivan","last_name":"Ivanov","tags":[]}`,
+		},
 	}
 
-	want := `{"last_name":"Ivanov"}`
-	if string(got) != want {
-		t.Fatalf("Marshal() = %s, want %s", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := New(tt.tag).Marshal(tt.in)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+
+			assertJSONEqual(t, got, []byte(tt.want))
+		})
 	}
 }
 
-func TestMarshalWithStandardJSONTag(t *testing.T) {
-	enc := New("json")
-	user := model.User{LastName: "Ivanov"}
-
-	got, err := enc.Marshal(user)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+func TestUnmarshalWithTags(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		data string
+		want model.User
+	}{
+		{
+			name: "snake",
+			tag:  "json_snake",
+			data: `{"last_name":"Petrov"}`,
+			want: model.User{LastName: "Petrov"},
+		},
+		{
+			name: "camel",
+			tag:  "json_camel",
+			data: `{"lastName":"Sidorov"}`,
+			want: model.User{LastName: "Sidorov"},
+		},
 	}
 
-	want := `{"lastName":"Ivanov"}`
-	if string(got) != want {
-		t.Fatalf("Marshal() = %s, want %s", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got model.User
+			if err := New(tt.tag).Unmarshal([]byte(tt.data), &got); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Unmarshal() = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestUnmarshalWithSnakeTag(t *testing.T) {
-	enc := NewJsonEncoder("json_snake")
-	data := []byte(`{"last_name":"Petrov"}`)
-
-	var user model.User
-	if err := enc.Unmarshal(data, &user); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
+func TestStandardPackageAPI(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.User
+		want string
+	}{
+		{
+			name: "user",
+			in:   model.User{LastName: "Volkov"},
+			want: `{"lastName":"Volkov"}`,
+		},
 	}
 
-	if user.LastName != "Petrov" {
-		t.Fatalf("Unmarshal() user.LastName = %q, want %q", user.LastName, "Petrov")
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := Marshal(tt.in)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			assertJSONEqual(t, data, []byte(tt.want))
 
-func TestUnmarshalWithCamelTag(t *testing.T) {
-	enc := New("json_camel")
-	data := []byte(`{"lastName":"Sidorov"}`)
+			var out model.User
+			if err := Unmarshal(data, &out); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
 
-	var user model.User
-	if err := enc.Unmarshal(data, &user); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if user.LastName != "Sidorov" {
-		t.Fatalf("Unmarshal() user.LastName = %q, want %q", user.LastName, "Sidorov")
+			if !reflect.DeepEqual(out, tt.in) {
+				t.Fatalf("Unmarshal() = %#v, want %#v", out, tt.in)
+			}
+		})
 	}
 }
 
@@ -117,41 +211,60 @@ func TestMarshalUnmarshalNestedStruct(t *testing.T) {
 }
 
 func TestPackageLevelAPI(t *testing.T) {
-	user := model.User{LastName: "Volkov"}
+	tests := []struct {
+		name string
+		tag  string
+		in   model.User
+		want string
+	}{
+		{
+			name: "snake",
+			tag:  "json_snake",
+			in:   model.User{LastName: "Volkov"},
+			want: `{"last_name":"Volkov"}`,
+		},
+		{
+			name: "camel",
+			tag:  "json_camel",
+			in:   model.User{LastName: "Volkov"},
+			want: `{"lastName":"Volkov"}`,
+		},
+	}
 
-	data, err := MarshalWithTag(user, "json_snake")
-	if err != nil {
-		t.Fatalf("MarshalWithTag() error = %v", err)
-	}
-	if string(data) != `{"last_name":"Volkov"}` {
-		t.Fatalf("MarshalWithTag() = %s", data)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := MarshalWithTag(tt.in, tt.tag)
+			if err != nil {
+				t.Fatalf("MarshalWithTag() error = %v", err)
+			}
+			assertJSONEqual(t, data, []byte(tt.want))
 
-	var out model.User
-	if err := UnmarshalWithTag(data, &out, "json_snake"); err != nil {
-		t.Fatalf("UnmarshalWithTag() error = %v", err)
-	}
-	if out.LastName != "Volkov" {
-		t.Fatalf("UnmarshalWithTag() user.LastName = %q, want %q", out.LastName, "Volkov")
+			var out model.User
+			if err := UnmarshalWithTag(data, &out, tt.tag); err != nil {
+				t.Fatalf("UnmarshalWithTag() error = %v", err)
+			}
+
+			if !reflect.DeepEqual(out, tt.in) {
+				t.Fatalf("UnmarshalWithTag() = %#v, want %#v", out, tt.in)
+			}
+		})
 	}
 }
 
-func TestPackageLevelStandardAPI(t *testing.T) {
-	user := model.User{LastName: "Volkov"}
+func assertJSONEqual(t *testing.T, got []byte, want []byte) {
+	t.Helper()
 
-	data, err := Marshal(user)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	if string(data) != `{"lastName":"Volkov"}` {
-		t.Fatalf("Marshal() = %s", data)
+	var gotJSON any
+	if err := json.Unmarshal(got, &gotJSON); err != nil {
+		t.Fatalf("got is not valid JSON: %s: %v", got, err)
 	}
 
-	var out model.User
-	if err := Unmarshal(data, &out); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
+	var wantJSON any
+	if err := json.Unmarshal(want, &wantJSON); err != nil {
+		t.Fatalf("want is not valid JSON: %s: %v", want, err)
 	}
-	if out.LastName != "Volkov" {
-		t.Fatalf("Unmarshal() user.LastName = %q, want %q", out.LastName, "Volkov")
+
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Fatalf("JSON = %#v, want %#v; raw got %s", gotJSON, wantJSON, got)
 	}
 }

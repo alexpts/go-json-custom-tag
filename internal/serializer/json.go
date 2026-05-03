@@ -69,14 +69,6 @@ func New(structTag string) *JSON {
 	return &JSON{Tag: structTag}
 }
 
-func NewJsonEncoder(structTag string) *JSON {
-	if structTag == "" {
-		structTag = "json_snake"
-	}
-
-	return &JSON{Tag: structTag}
-}
-
 func (u JSON) Marshal(v any) ([]byte, error) {
 	if v == nil {
 		return nil, errors.New("marshal nil value")
