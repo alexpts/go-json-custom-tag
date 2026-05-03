@@ -38,6 +38,19 @@ func BenchmarkMarshalStdJSON(b *testing.B) {
 	}
 }
 
+func BenchmarkMarshalStdJSONPointer(b *testing.B) {
+	v := benchPayload()
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := json.Marshal(&v)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkMarshalCustomSnake_WarmCache(b *testing.B) {
 	v := benchPayload()
 	enc := New("json_snake")
@@ -49,6 +62,23 @@ func BenchmarkMarshalCustomSnake_WarmCache(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_, err := enc.Marshal(v)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMarshalCustomSnakePointer_WarmCache(b *testing.B) {
+	v := benchPayload()
+	enc := New("json_snake")
+
+	_, _ = enc.Marshal(&v)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := enc.Marshal(&v)
 		if err != nil {
 			b.Fatal(err)
 		}

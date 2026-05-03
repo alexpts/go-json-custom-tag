@@ -25,6 +25,7 @@ type fieldMeta struct {
 	Name      string
 	JSONName  []byte
 	OmitEmpty bool
+	Encoder   valueEncoder
 }
 
 type structMeta struct {
@@ -32,7 +33,17 @@ type structMeta struct {
 	SizeHint int
 }
 
-var structMetaCache sync.Map
+type valueEncoder func(buf []byte, value reflect.Value, codec JSON) ([]byte, error)
+
+var (
+	structMetaCache  sync.Map
+	encodeBufferPool = sync.Pool{
+		New: func() any {
+			buf := make([]byte, 0, 512)
+			return &buf
+		},
+	}
+)
 
 func Marshal(v any) ([]byte, error) {
 	return New("json").Marshal(v)
@@ -76,13 +87,23 @@ func (u JSON) Marshal(v any) ([]byte, error) {
 	}
 
 	value := reflect.ValueOf(v)
-	buf := make([]byte, 0, u.bufferCapacity(value))
+	bufPtr := encodeBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	if capacity := u.bufferCapacity(value); cap(buf) < capacity {
+		buf = make([]byte, 0, capacity)
+	}
+
 	buf, err := u.appendValue(buf, value)
 	if err != nil {
+		returnEncodeBuffer(bufPtr, buf)
 		return nil, err
 	}
 
-	return buf, nil
+	output := make([]byte, len(buf))
+	copy(output, buf)
+	returnEncodeBuffer(bufPtr, buf)
+
+	return output, nil
 }
 
 func (u JSON) Unmarshal(data []byte, v any) error {
@@ -155,7 +176,7 @@ func (u JSON) appendValue(buf []byte, value reflect.Value) ([]byte, error) {
 			buf = append(buf, ':')
 
 			var err error
-			buf, err = u.appendValue(buf, fieldValue)
+			buf, err = field.Encoder(buf, fieldValue, u)
 			if err != nil {
 				return nil, err
 			}
@@ -440,6 +461,7 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 			Name:      name,
 			JSONName:  jsonName,
 			OmitEmpty: omitempty,
+			Encoder:   encoderForType(field.Type),
 		})
 		built.SizeHint += len(jsonName) + 2
 	}
@@ -471,6 +493,137 @@ func (u JSON) bufferCapacity(value reflect.Value) int {
 
 	meta := getStructMeta(value.Type(), u.Tag)
 	return meta.SizeHint + 64
+}
+
+func returnEncodeBuffer(bufPtr *[]byte, buf []byte) {
+	if cap(buf) > 64*1024 {
+		return
+	}
+
+	*bufPtr = buf[:0]
+	encodeBufferPool.Put(bufPtr)
+}
+
+func encoderForType(typ reflect.Type) valueEncoder {
+	if typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Interface {
+		return encodeDefaultValue
+	}
+
+	switch typ.Kind() {
+	case reflect.String:
+		return encodeStringValue
+	case reflect.Bool:
+		return encodeBoolValue
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return encodeIntValue
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return encodeUintValue
+	case reflect.Float32:
+		return encodeFloat32Value
+	case reflect.Float64:
+		return encodeFloat64Value
+	case reflect.Slice, reflect.Array:
+		switch typ.Elem().Kind() {
+		case reflect.String:
+			return encodeStringArrayValue
+		case reflect.Bool:
+			return encodeBoolArrayValue
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return encodeIntArrayValue
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return encodeUintArrayValue
+		case reflect.Float32:
+			return encodeFloat32ArrayValue
+		case reflect.Float64:
+			return encodeFloat64ArrayValue
+		}
+	}
+
+	return encodeDefaultValue
+}
+
+func encodeDefaultValue(buf []byte, value reflect.Value, codec JSON) ([]byte, error) {
+	return codec.appendValue(buf, value)
+}
+
+func encodeStringValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendQuote(buf, dereferenceValue(value).String()), nil
+}
+
+func encodeBoolValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendBool(buf, dereferenceValue(value).Bool()), nil
+}
+
+func encodeIntValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendInt(buf, dereferenceValue(value).Int(), 10), nil
+}
+
+func encodeUintValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendUint(buf, dereferenceValue(value).Uint(), 10), nil
+}
+
+func encodeFloat32Value(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendFloat(buf, dereferenceValue(value).Float(), 'g', -1, 32), nil
+}
+
+func encodeFloat64Value(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	return strconv.AppendFloat(buf, dereferenceValue(value).Float(), 'g', -1, 64), nil
+}
+
+func encodeStringArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendStringArray(buf, dereferenceValue(value)), nil
+}
+
+func encodeBoolArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendBoolArray(buf, dereferenceValue(value)), nil
+}
+
+func encodeIntArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendIntArray(buf, dereferenceValue(value)), nil
+}
+
+func encodeUintArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendUintArray(buf, dereferenceValue(value)), nil
+}
+
+func encodeFloat32ArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendFloatArray(buf, dereferenceValue(value), 32), nil
+}
+
+func encodeFloat64ArrayValue(buf []byte, value reflect.Value, _ JSON) ([]byte, error) {
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return append(buf, "null"...), nil
+	}
+
+	return appendFloatArray(buf, dereferenceValue(value), 64), nil
+}
+
+func dereferenceValue(value reflect.Value) reflect.Value {
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		value = value.Elem()
+	}
+
+	return value
 }
 
 func appendJSONMarshal(buf []byte, value any) ([]byte, error) {
