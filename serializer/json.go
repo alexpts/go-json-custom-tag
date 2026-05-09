@@ -21,7 +21,7 @@ type structCacheKey struct {
 }
 
 type fieldMeta struct {
-	Index     int
+	Index     []int
 	Name      string
 	JSONName  []byte
 	OmitEmpty bool
@@ -150,7 +150,7 @@ func (u JSON) appendValue(buf []byte, value reflect.Value) ([]byte, error) {
 		wroteField := false
 
 		for _, field := range meta.Fields {
-			fieldValue := value.Field(field.Index)
+			fieldValue := value.FieldByIndex(field.Index)
 			if field.OmitEmpty && isZero(fieldValue) {
 				continue
 			}
@@ -291,7 +291,7 @@ func (u JSON) assignValue(target reflect.Value, source any) error {
 				continue
 			}
 
-			if err := u.assignValue(target.Field(field.Index), raw); err != nil {
+			if err := u.assignValue(target.FieldByIndex(field.Index), raw); err != nil {
 				return err
 			}
 		}
@@ -432,20 +432,59 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 		Fields: make([]fieldMeta, 0, typ.NumField()),
 	}
 
+	seen := make(map[string]struct{}, typ.NumField())
+
 	for i := range typ.NumField() {
 		field := typ.Field(i)
 		if field.PkgPath != "" {
 			continue
 		}
 
+		rawTag := field.Tag.Get(tag)
 		name, skip, omitempty := fieldTagMeta(field, tag)
 		if skip {
 			continue
 		}
 
+		// Anonymous embedded struct without an explicit name in the selected tag:
+		// treat as "inlined" (promoted) fields, like encoding/json does for json tags.
+		// Outer struct fields win on name conflicts.
+		if field.Anonymous && rawTag == "" {
+			embeddedType := field.Type
+			for embeddedType.Kind() == reflect.Pointer {
+				embeddedType = embeddedType.Elem()
+			}
+			if embeddedType.Kind() == reflect.Struct {
+				embeddedMeta := getStructMeta(embeddedType, tag)
+				for _, ef := range embeddedMeta.Fields {
+					if _, ok := seen[ef.Name]; ok {
+						continue
+					}
+					seen[ef.Name] = struct{}{}
+
+					idx := make([]int, 0, 1+len(ef.Index))
+					idx = append(idx, i)
+					idx = append(idx, ef.Index...)
+					built.Fields = append(built.Fields, fieldMeta{
+						Index:     idx,
+						Name:      ef.Name,
+						JSONName:  ef.JSONName,
+						OmitEmpty: ef.OmitEmpty,
+						Encoder:   ef.Encoder,
+					})
+					built.SizeHint += len(ef.JSONName) + 2
+				}
+				continue
+			}
+		}
+
 		jsonName := []byte(strconv.Quote(name))
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
 		built.Fields = append(built.Fields, fieldMeta{
-			Index:     i,
+			Index:     []int{i},
 			Name:      name,
 			JSONName:  jsonName,
 			OmitEmpty: omitempty,

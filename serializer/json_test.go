@@ -13,9 +13,13 @@ type account struct {
 	Name string `json:"name" json_snake:"name" json_camel:"name"`
 }
 
-type profile struct {
+type Profile struct {
 	User    model.User `json:"user" json_snake:"user" json_camel:"user"`
 	Account account    `json:"account" json_snake:"account" json_camel:"account"`
+}
+
+type embeddedProfile struct {
+	Profile
 }
 
 type taggedSample struct {
@@ -172,7 +176,7 @@ func TestStandardPackageAPI(t *testing.T) {
 
 func TestMarshalUnmarshalNestedStruct(t *testing.T) {
 	enc := New("json_snake")
-	input := profile{
+	input := Profile{
 		User:    model.User{LastName: "Smirnov"},
 		Account: account{ID: 7, Name: "core"},
 	}
@@ -200,11 +204,37 @@ func TestMarshalUnmarshalNestedStruct(t *testing.T) {
 		t.Fatalf("marshal map = %#v, want %#v", gotMap, wantMap)
 	}
 
-	var roundtrip profile
+	var roundtrip Profile
 	if err := enc.Unmarshal(data, &roundtrip); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
+	if !reflect.DeepEqual(roundtrip, input) {
+		t.Fatalf("roundtrip = %#v, want %#v", roundtrip, input)
+	}
+}
+
+func TestMarshalUnmarshalEmbeddedStructWithoutJSONTag(t *testing.T) {
+	enc := New("json_snake")
+	input := embeddedProfile{
+		Profile: Profile{
+			User:    model.User{LastName: "Smirnov"},
+			Account: account{ID: 7, Name: "core"},
+		},
+	}
+
+	// Embedded поле без json-тега должно "расплющиваться":
+	// без обертки вида {"profile":{...}}.
+	data, err := enc.Marshal(input)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	assertJSONEqual(t, data, []byte(`{"user":{"last_name":"Smirnov"},"account":{"id":7,"name":"core"}}`))
+
+	var roundtrip embeddedProfile
+	if err := enc.Unmarshal(data, &roundtrip); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
 	if !reflect.DeepEqual(roundtrip, input) {
 		t.Fatalf("roundtrip = %#v, want %#v", roundtrip, input)
 	}
