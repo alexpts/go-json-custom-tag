@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ type structCacheKey struct {
 
 type fieldMeta struct {
 	Index     []int
+	DecodePos int
 	Name      string
 	JSONName  []byte
 	OmitEmpty bool
@@ -29,8 +31,11 @@ type fieldMeta struct {
 }
 
 type structMeta struct {
-	Fields   []fieldMeta
-	SizeHint int
+	Fields      []fieldMeta
+	FieldByName map[string]fieldMeta
+	DecodeType  reflect.Type
+	UseNumber   bool
+	SizeHint    int
 }
 
 type valueEncoder func(buf []byte, value reflect.Value, codec JSON) ([]byte, error)
@@ -108,15 +113,27 @@ func (u JSON) Unmarshal(data []byte, v any) error {
 		return json.Unmarshal(data, v)
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
+	elem := target.Elem()
+	if elem.Kind() == reflect.Struct {
+		meta := getStructMeta(elem.Type(), u.Tag)
+		decoded := reflect.New(meta.DecodeType).Elem()
+		if meta.UseNumber {
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			if err := decoder.Decode(decoded.Addr().Interface()); err != nil {
+				return err
+			}
+			if decoder.Decode(&struct{}{}) != io.EOF {
+				return errors.New("invalid json")
+			}
+		} else if err := json.Unmarshal(data, decoded.Addr().Interface()); err != nil {
+			return err
+		}
 
-	var raw any
-	if err := decoder.Decode(&raw); err != nil {
-		return err
+		return copyDecodedStruct(decoded, elem, meta, u.Tag)
 	}
 
-	return u.assignValue(target.Elem(), raw)
+	return u.assignRawValue(elem, data)
 }
 
 func (u JSON) appendValue(buf []byte, value reflect.Value) ([]byte, error) {
@@ -250,23 +267,18 @@ func (u JSON) appendValue(buf []byte, value reflect.Value) ([]byte, error) {
 	}
 }
 
-func (u JSON) assignValue(target reflect.Value, source any) error {
+func (u JSON) assignRawValue(target reflect.Value, raw json.RawMessage) error {
 	if !target.CanSet() {
 		return nil
 	}
 
 	if target.CanAddr() {
 		if unmarshaler, ok := target.Addr().Interface().(json.Unmarshaler); ok {
-			raw, err := json.Marshal(source)
-			if err != nil {
-				return err
-			}
-
 			return unmarshaler.UnmarshalJSON(raw)
 		}
 	}
 
-	if source == nil {
+	if isRawNull(raw) {
 		target.SetZero()
 		return nil
 	}
@@ -277,35 +289,22 @@ func (u JSON) assignValue(target reflect.Value, source any) error {
 			target.Set(reflect.New(target.Type().Elem()))
 		}
 
-		return u.assignValue(target.Elem(), source)
+		return u.assignRawValue(target.Elem(), raw)
 	case reflect.Struct:
-		sourceMap, ok := source.(map[string]any)
-		if !ok {
-			return fmt.Errorf("expected object for %s, got %T", target.Type(), source)
-		}
-
-		meta := getStructMeta(target.Type(), u.Tag)
-		for _, field := range meta.Fields {
-			raw, exists := sourceMap[field.Name]
-			if !exists {
-				continue
-			}
-
-			if err := u.assignValue(target.FieldByIndex(field.Index), raw); err != nil {
-				return err
-			}
-		}
-
-		return nil
+		return u.assignRawStruct(target, raw)
 	case reflect.Slice:
-		sourceSlice, ok := source.([]any)
-		if !ok {
-			return fmt.Errorf("expected array for %s, got %T", target.Type(), source)
+		if useStdJSONForType(target.Type().Elem()) {
+			return json.Unmarshal(raw, target.Addr().Interface())
+		}
+
+		var sourceSlice []json.RawMessage
+		if err := json.Unmarshal(raw, &sourceSlice); err != nil {
+			return fmt.Errorf("expected array for %s: %w", target.Type(), err)
 		}
 
 		result := reflect.MakeSlice(target.Type(), len(sourceSlice), len(sourceSlice))
 		for i := range sourceSlice {
-			if err := u.assignValue(result.Index(i), sourceSlice[i]); err != nil {
+			if err := u.assignRawValue(result.Index(i), sourceSlice[i]); err != nil {
 				return err
 			}
 		}
@@ -313,14 +312,18 @@ func (u JSON) assignValue(target reflect.Value, source any) error {
 		target.Set(result)
 		return nil
 	case reflect.Array:
-		sourceSlice, ok := source.([]any)
-		if !ok {
-			return fmt.Errorf("expected array for %s, got %T", target.Type(), source)
+		if useStdJSONForType(target.Type().Elem()) {
+			return json.Unmarshal(raw, target.Addr().Interface())
+		}
+
+		var sourceSlice []json.RawMessage
+		if err := json.Unmarshal(raw, &sourceSlice); err != nil {
+			return fmt.Errorf("expected array for %s: %w", target.Type(), err)
 		}
 
 		limit := min(target.Len(), len(sourceSlice))
 		for i := range limit {
-			if err := u.assignValue(target.Index(i), sourceSlice[i]); err != nil {
+			if err := u.assignRawValue(target.Index(i), sourceSlice[i]); err != nil {
 				return err
 			}
 		}
@@ -331,15 +334,19 @@ func (u JSON) assignValue(target reflect.Value, source any) error {
 			return fmt.Errorf("unsupported map key type: %s", target.Type().Key())
 		}
 
-		sourceMap, ok := source.(map[string]any)
-		if !ok {
-			return fmt.Errorf("expected object for %s, got %T", target.Type(), source)
+		if useStdJSONForType(target.Type().Elem()) {
+			return json.Unmarshal(raw, target.Addr().Interface())
+		}
+
+		sourceMap := make(map[string]json.RawMessage)
+		if err := json.Unmarshal(raw, &sourceMap); err != nil {
+			return fmt.Errorf("expected object for %s: %w", target.Type(), err)
 		}
 
 		result := reflect.MakeMapWithSize(target.Type(), len(sourceMap))
-		for key, raw := range sourceMap {
+		for key, fieldRaw := range sourceMap {
 			mapValue := reflect.New(target.Type().Elem()).Elem()
-			if err := u.assignValue(mapValue, raw); err != nil {
+			if err := u.assignRawValue(mapValue, fieldRaw); err != nil {
 				return err
 			}
 
@@ -349,56 +356,134 @@ func (u JSON) assignValue(target reflect.Value, source any) error {
 		target.Set(result)
 		return nil
 	case reflect.Interface:
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var source any
+		if err := decoder.Decode(&source); err != nil {
+			return err
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			return errors.New("invalid json")
+		}
 		target.Set(reflect.ValueOf(source))
 		return nil
-	case reflect.String:
-		value, ok := source.(string)
-		if !ok {
-			return fmt.Errorf("expected string for %s, got %T", target.Type(), source)
-		}
-
-		target.SetString(value)
-		return nil
-	case reflect.Bool:
-		value, ok := source.(bool)
-		if !ok {
-			return fmt.Errorf("expected bool for %s, got %T", target.Type(), source)
-		}
-
-		target.SetBool(value)
-		return nil
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		value, err := toInt64(source)
-		if err != nil {
-			return err
-		}
-
-		target.SetInt(value)
-		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		value, err := toUint64(source)
-		if err != nil {
-			return err
-		}
-
-		target.SetUint(value)
-		return nil
-	case reflect.Float32, reflect.Float64:
-		value, err := toFloat64(source)
-		if err != nil {
-			return err
-		}
-
-		target.SetFloat(value)
-		return nil
 	default:
-		raw, err := json.Marshal(source)
-		if err != nil {
-			return err
-		}
-
 		return json.Unmarshal(raw, target.Addr().Interface())
 	}
+}
+
+func (u JSON) assignRawStruct(target reflect.Value, raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("expected object for %s: %w", target.Type(), err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("expected object for %s", target.Type())
+	}
+
+	meta := getStructMeta(target.Type(), u.Tag)
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+
+		name, ok := token.(string)
+		if !ok {
+			return fmt.Errorf("expected object key for %s", target.Type())
+		}
+
+		field, exists := meta.FieldByName[name]
+		if !exists {
+			var skip json.RawMessage
+			if err := decoder.Decode(&skip); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := u.decodeValue(decoder, target.FieldByIndex(field.Index)); err != nil {
+			return err
+		}
+	}
+
+	token, err = decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '}' {
+		return fmt.Errorf("expected object end for %s", target.Type())
+	}
+
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("invalid json")
+	}
+
+	return nil
+}
+
+func (u JSON) decodeValue(decoder *json.Decoder, target reflect.Value) error {
+	if !target.CanSet() {
+		var skip json.RawMessage
+		return decoder.Decode(&skip)
+	}
+
+	if requiresRawDecode(target) {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+
+		return u.assignRawValue(target, raw)
+	}
+
+	return decoder.Decode(target.Addr().Interface())
+}
+
+func requiresRawDecode(target reflect.Value) bool {
+	if target.CanAddr() {
+		if _, ok := target.Addr().Interface().(json.Unmarshaler); ok {
+			return true
+		}
+	}
+
+	typ := target.Type()
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	switch typ.Kind() {
+	case reflect.Struct, reflect.Interface:
+		return true
+	case reflect.Slice, reflect.Array:
+		elem := typ.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		return elem.Kind() == reflect.Struct || elem.Kind() == reflect.Interface
+	case reflect.Map:
+		elem := typ.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		return elem.Kind() == reflect.Struct || elem.Kind() == reflect.Interface
+	default:
+		return false
+	}
+}
+
+func isRawNull(raw json.RawMessage) bool {
+	return len(raw) == 4 && raw[0] == 'n' && raw[1] == 'u' && raw[2] == 'l' && raw[3] == 'l'
+}
+
+func useStdJSONForType(typ reflect.Type) bool {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	return typ.Kind() != reflect.Struct && typ.Kind() != reflect.Interface
 }
 
 func fieldTagMeta(field reflect.StructField, tag string) (name string, skip bool, omitempty bool) {
@@ -429,7 +514,8 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 	}
 
 	built := &structMeta{
-		Fields: make([]fieldMeta, 0, typ.NumField()),
+		Fields:      make([]fieldMeta, 0, typ.NumField()),
+		FieldByName: make(map[string]fieldMeta, typ.NumField()),
 	}
 
 	seen := make(map[string]struct{}, typ.NumField())
@@ -472,6 +558,7 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 						OmitEmpty: ef.OmitEmpty,
 						Encoder:   ef.Encoder,
 					})
+					built.FieldByName[ef.Name] = built.Fields[len(built.Fields)-1]
 					built.SizeHint += len(ef.JSONName) + 2
 				}
 				continue
@@ -490,7 +577,29 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 			OmitEmpty: omitempty,
 			Encoder:   encoderForType(field.Type),
 		})
+		built.FieldByName[name] = built.Fields[len(built.Fields)-1]
 		built.SizeHint += len(jsonName) + 2
+	}
+
+	decodeFields := make([]reflect.StructField, len(built.Fields))
+	for i := range built.Fields {
+		built.Fields[i].DecodePos = i
+		built.FieldByName[built.Fields[i].Name] = built.Fields[i]
+
+		fieldType := typ.FieldByIndex(built.Fields[i].Index).Type
+		if typeNeedsUseNumber(fieldType, tag) {
+			built.UseNumber = true
+		}
+		decodeFields[i] = reflect.StructField{
+			Name: fmt.Sprintf("F%d", i),
+			Type: decodeTypeFor(fieldType, tag),
+			Tag:  reflect.StructTag(`json:"` + built.Fields[i].Name + `"`),
+		}
+	}
+	if len(decodeFields) == 0 {
+		built.DecodeType = reflect.StructOf([]reflect.StructField{})
+	} else {
+		built.DecodeType = reflect.StructOf(decodeFields)
 	}
 
 	if len(built.Fields) > 0 {
@@ -500,6 +609,131 @@ func getStructMeta(typ reflect.Type, tag string) *structMeta {
 
 	actual, _ := structMetaCache.LoadOrStore(key, built)
 	return actual.(*structMeta)
+}
+
+func decodeTypeFor(typ reflect.Type, tag string) reflect.Type {
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return reflect.PointerTo(decodeTypeFor(typ.Elem(), tag))
+	case reflect.Struct:
+		if reflect.PointerTo(typ).Implements(unmarshalerType) || typ.Implements(unmarshalerType) {
+			return typ
+		}
+		return getStructMeta(typ, tag).DecodeType
+	case reflect.Slice:
+		return reflect.SliceOf(decodeTypeFor(typ.Elem(), tag))
+	case reflect.Array:
+		return reflect.ArrayOf(typ.Len(), decodeTypeFor(typ.Elem(), tag))
+	case reflect.Map:
+		if typ.Key().Kind() != reflect.String {
+			return typ
+		}
+		return reflect.MapOf(typ.Key(), decodeTypeFor(typ.Elem(), tag))
+	default:
+		return typ
+	}
+}
+
+var unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+
+func typeNeedsUseNumber(typ reflect.Type, tag string) bool {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	switch typ.Kind() {
+	case reflect.Interface:
+		return true
+	case reflect.Struct:
+		if reflect.PointerTo(typ).Implements(unmarshalerType) || typ.Implements(unmarshalerType) {
+			return false
+		}
+		return getStructMeta(typ, tag).UseNumber
+	case reflect.Slice, reflect.Array:
+		return typeNeedsUseNumber(typ.Elem(), tag)
+	case reflect.Map:
+		return typeNeedsUseNumber(typ.Elem(), tag)
+	default:
+		return false
+	}
+}
+
+func copyDecodedStruct(source reflect.Value, target reflect.Value, meta *structMeta, tag string) error {
+	for _, field := range meta.Fields {
+		if err := copyDecodedValue(source.Field(field.DecodePos), target.FieldByIndex(field.Index), tag); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func copyDecodedValue(source reflect.Value, target reflect.Value, tag string) error {
+	if !target.CanSet() {
+		return nil
+	}
+	if source.Type().AssignableTo(target.Type()) {
+		target.Set(source)
+		return nil
+	}
+
+	switch target.Kind() {
+	case reflect.Pointer:
+		if source.IsNil() {
+			target.SetZero()
+			return nil
+		}
+		if target.IsNil() {
+			target.Set(reflect.New(target.Type().Elem()))
+		}
+		return copyDecodedValue(source.Elem(), target.Elem(), tag)
+	case reflect.Struct:
+		meta := getStructMeta(target.Type(), tag)
+		return copyDecodedStruct(source, target, meta, tag)
+	case reflect.Slice:
+		if source.IsNil() {
+			target.SetZero()
+			return nil
+		}
+		result := reflect.MakeSlice(target.Type(), source.Len(), source.Len())
+		for i := range source.Len() {
+			if err := copyDecodedValue(source.Index(i), result.Index(i), tag); err != nil {
+				return err
+			}
+		}
+		target.Set(result)
+		return nil
+	case reflect.Array:
+		limit := min(source.Len(), target.Len())
+		for i := range limit {
+			if err := copyDecodedValue(source.Index(i), target.Index(i), tag); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		if source.IsNil() {
+			target.SetZero()
+			return nil
+		}
+		result := reflect.MakeMapWithSize(target.Type(), source.Len())
+		iter := source.MapRange()
+		for iter.Next() {
+			mapValue := reflect.New(target.Type().Elem()).Elem()
+			if err := copyDecodedValue(iter.Value(), mapValue, tag); err != nil {
+				return err
+			}
+			result.SetMapIndex(iter.Key(), mapValue)
+		}
+		target.Set(result)
+		return nil
+	default:
+		if source.Type().ConvertibleTo(target.Type()) {
+			target.Set(source.Convert(target.Type()))
+			return nil
+		}
+		return fmt.Errorf("cannot assign decoded %s to %s", source.Type(), target.Type())
+	}
 }
 
 func (u JSON) bufferCapacity(value reflect.Value) int {

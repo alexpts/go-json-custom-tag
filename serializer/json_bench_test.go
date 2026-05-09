@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/alexpts/go-json-custom-tag/test/model"
 )
 
@@ -47,49 +45,6 @@ func BenchmarkMarshalStdJSONPointer(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_, err := json.Marshal(&v)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkMarshalSonicFast(b *testing.B) {
-	v := benchPayload()
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	encoder := sonic.ConfigFastest
-
-	for i := 0; i < b.N; i++ {
-		_, err := encoder.Marshal(v)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkMarshalSonic(b *testing.B) {
-	v := benchPayload()
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	encoder := sonic.ConfigDefault
-
-	for i := 0; i < b.N; i++ {
-		_, err := encoder.Marshal(v)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkMarshalSonicPointer(b *testing.B) {
-	v := benchPayload()
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, err := sonic.Marshal(&v)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -139,6 +94,44 @@ func BenchmarkMarshalCustomSnake_ColdLike(b *testing.B) {
 		enc := New("json_snake")
 		_, err := enc.Marshal(v)
 		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUnmarshalStdJSON(b *testing.B) {
+	data, err := json.Marshal(benchPayload())
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var v benchProfile
+		if err := json.Unmarshal(data, &v); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUnmarshalCustomSnake_WarmCache(b *testing.B) {
+	enc := New("json_snake")
+	data, err := enc.Marshal(benchPayload())
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var warm benchProfile
+	_ = enc.Unmarshal(data, &warm)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var v benchProfile
+		if err := enc.Unmarshal(data, &v); err != nil {
 			b.Fatal(err)
 		}
 	}
